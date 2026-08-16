@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cr-labeler"
+version = "1.0.0"
+description = "Tag Google Street View panoramas with the copyright year visible in the imagery"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# Only needed if you want the API key stored in the OS keyring rather than an
+# environment variable or a file.
+keyring = ["keyring>=24.0"]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.scripts]
+cr-label = "cr_labeler.cli:main"
+
+[tool.setuptools]
+packages = ["cr_labeler"]
+
+[tool.setuptools.package-data]
+cr_labeler = ["../bank/templates.npz"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
+ignore = ["E501"]

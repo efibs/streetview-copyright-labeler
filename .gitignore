@@ -1,0 +1,41 @@
+# Secrets: never commit an API key.
+.env
+*.key
+api-key*.txt
+
+# Run artefacts, all regenerable.
+# NOTE: git has no trailing comments in .gitignore -- a comment on the same line
+# becomes part of the pattern, so every note here sits on its own line.
+
+# downloaded tiles
+cache/
+# tagged maps
+out/
+# harvest output awaiting labelling
+clusters/
+datasets/clusters/
+# saved composite PNGs
+composites/
+# output of `cr-label label`
+*_tagged.json
+# per-panorama score dumps; they go stale as the bank changes
+*-report.csv
+
+# Vali writes these next to each config it is given.
+vali/*-locations.json
+vali/stratum-*.json
+vali/band-*
+vali/probe-*
+vali/*-country-distribution.txt
+vali/*-subdivision-distribution.txt
+vali/download.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
