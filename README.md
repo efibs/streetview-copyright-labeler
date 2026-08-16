@@ -103,8 +103,11 @@ Then three checks decide whether to trust it, because **declining to answer beat
 | Does *every* digit match, not just on average? | years the bank has never seen |
 | Does the winner beat the runner-up? | genuine ties |
 
-If a reading is weak it escalates — first over the full sphere, then to zoom 4, which covers four
-times the area at the same glyph size and typically triples the number of instances found.
+If a reading is weak it escalates, each step kept only if it scores better than what came before:
+zoom 3, then the full sphere, then zoom 4 — which covers four times the area at the same glyph size
+and typically triples the number of instances found. "Weak" includes two readings that *look*
+answered: one built from a single instance (nothing agreed with it, so consensus never checked it)
+and one whose winning year barely beat the runner-up.
 
 ### Why a bank of real images, and not rendered text
 
@@ -123,7 +126,17 @@ conda activate cr_labeler
 pip install -e .
 ```
 
-Only `numpy`, `pillow` and `requests`. No OpenCV, no PyTorch. Tile fetching needs no API key.
+Only `numpy`, `pillow` and `requests`. No OpenCV. Tile fetching needs no API key.
+
+**Optional GPU.** If PyTorch with a working CUDA device happens to be installed, the correlation runs
+there instead — about 1.4x end to end, and nothing about it is required. There is no GPU-only code
+path: without torch, without a driver, or with `CR_LABELER_DEVICE=cpu`, everything runs on numpy and
+produces the same labels (verified identical across all 543 hand-labelled panoramas). To try it:
+
+```bash
+pip install torch            # optional, ~2.5 GB
+CR_LABELER_DEVICE=cpu ...    # force the numpy path back on at any time
+```
 
 ## Quick start
 
@@ -137,29 +150,43 @@ cr-label evaluate --gt CR_GT.json                           # score against GT_*
 |---|---|---|
 | `--report FILE.csv` | off | Per-panorama scores: confidence, instances, style, margins |
 | `--cache DIR` | off | Tile cache; makes repeat runs nearly free |
-| `--workers N` | 8 | Panoramas in parallel (past 8 does not help) |
+| `--workers N` | 24, or 8 with a GPU | Panoramas in parallel |
+| `--zoom N` | 2 | Where the ladder starts; weak reads fall through to 3 and 4 anyway |
 | `--rows top\|all` | `top` | `top` reads the upper hemisphere: ~96% of stamps, half the bytes |
-| `--no-escalate` | off | Skip retries — **9.2 panoramas/s instead of 3.8**, at some coverage |
+| `--no-escalate` | off | Skip retries — much faster, at real cost to coverage |
 | `--save-composites DIR` | off | Write each averaged watermark as a PNG, to check reads by eye |
 | `--api-key-file PATH` | — | Only for rows with no `panoId`; see below |
 
 ### Throughput
 
-Measured on modern Gen 4 coverage, cold cache, this machine (32 cores):
+Measured on modern Gen 4 coverage, cold cache, live network, this machine (Ryzen 9 7950X3D, 32
+threads, RTX A5000). Live-network runs vary by roughly ±20%, so these are medians of several
+300-panorama batches:
 
-| | pano/s | 100k panoramas |
+| | pano/s | 101,233 panoramas |
 |---|---|---|
-| default (16 workers) | **~6.7** | ~4.2 hours |
-| `--no-escalate` | ~9 | ~3 hours |
-| tiles already cached | ~11 | ~2.5 hours |
+| no GPU | **~7.4** | ~3.8 hours |
+| with GPU | **~11** | ~2.6 hours |
+| tiles already cached | ~13 | ~2.2 hours |
 
-Roughly **74% of the time is correlation** and 26% is waiting on Google, even cold. The work is
-mostly FFT, which releases the GIL, so it scales nearly linearly with threads — measured 7.9x on 8.
+**What actually costs time is tiles, not maths.** Fetching alone caps throughput at 10.8 panoramas/s
+at zoom 3 — so once correlation moved to the GPU, the network became the wall. That is why the ladder
+starts at zoom 2: four tiles instead of sixteen. About 65% of Gen 4 panoramas settle there and the
+rest fall through to zoom 3 unchanged, for an effective 9.7 tiles per panorama against 17.6.
 
-`--workers` defaults to half the core count, capped at 16, which is where the measured curve peaks.
-Going higher is counterproductive twice over: the transforms start contending for memory bandwidth,
-and Google throttles the tile requests (at 32 workers, fetch time per panorama went from 593 ms to
-3506 ms). Raising it is rarely the right move.
+Three changes got it from 5.8 to ~11 panoramas/s, and none of them cost accuracy:
+
+| Change | Effect |
+|---|---|
+| One shared tile pool instead of one per panorama | warm fetch 16.6 ms → 6.3 ms; decode moved into the workers |
+| Ladder starts at zoom 2 | 1.8x fewer tiles |
+| Optional GPU correlation | that step 10.7x faster (167 ms vs 1793 ms at zoom 4) |
+
+`--workers` is chosen by measurement and differs by backend. On the CPU most of a panorama is spent
+waiting on the network, so mild oversubscription wins (8.11 pano/s at 24 threads against 7.32 at 16);
+that used to backfire because each panorama opened its own tile pool and Google throttled the flood,
+which the shared pool fixed. With a GPU the transforms serialise on one device and extra threads just
+queue: 11.54 at 8 threads against 9.38 at 16.
 
 ---
 
@@ -363,6 +390,7 @@ ruff check .
 | Module | Responsibility |
 |---|---|
 | `signal.py` | High-pass, FFT cross-correlation, peak picking, consensus |
+| `accel.py` | Optional GPU correlation; falls back to numpy when there is none |
 | `composite.py` | Detect instances and average them into one watermark image |
 | `classify.py` | Style, alignment, per-digit scoring, the abstain/`None` decision |
 | `bank.py` | Reference templates: load, save, digit slots, clustering |

@@ -24,7 +24,7 @@ from .geometry import (
     PATCH_H,
     PATCH_W,
 )
-from .signal import Correlator, Peak, consensus, find_peaks, shift_subpixel
+from .signal import Peak, consensus, correlator_for, find_peaks, shift_subpixel
 
 # Instances considered for consensus, highest scoring first.  Real watermarks
 # rank near the top; a longer tail only costs time.
@@ -105,7 +105,7 @@ def build_composites(
     if not anchors:
         raise ValueError("at least one anchor is required")
 
-    correlator = Correlator(field)
+    correlator = correlator_for(field)
     results: list[CompositeResult] = []
 
     for anchor in anchors:

@@ -19,7 +19,7 @@ from .config import MissingApiKey, resolve_api_key
 from .discover import BootstrapFailed
 from .fetch import TileCache, TileFetcher
 from .geoguessr_io import GeoGuessrMap
-from .geometry import DEFAULT_ZOOM, DETECT_THRESHOLD
+from .geometry import DEFAULT_ZOOM, DETECT_THRESHOLD, LABEL_ZOOM
 from .labeler import Labeler, LabelResult, save_composite
 
 log = logging.getLogger("cr_labeler")
@@ -28,9 +28,9 @@ log = logging.getLogger("cr_labeler")
 # --- shared plumbing ------------------------------------------------------
 
 
-def _add_common(parser: argparse.ArgumentParser) -> None:
+def _add_common(parser: argparse.ArgumentParser, zoom: int = DEFAULT_ZOOM) -> None:
     parser.add_argument("--bank", type=Path, default=DEFAULT_BANK, help="template bank .npz")
-    parser.add_argument("--zoom", type=int, default=DEFAULT_ZOOM, help="tile zoom level")
+    parser.add_argument("--zoom", type=int, default=zoom, help="tile zoom level")
     parser.add_argument(
         "--rows",
         choices=("top", "all"),
@@ -50,15 +50,24 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 def default_workers() -> int:
     """Threads to run panoramas on.
 
-    The work is ~70% FFT, which releases the GIL, so this scales nearly
-    linearly -- measured 7.9x on 8 threads. It stops paying well before the core
-    count though: past ~16 the transforms contend for memory bandwidth and
-    throughput falls again (measured 7.31 pano/s at 16 against 6.68 at 24).
-    Half the cores, capped at 16, sits at the top of that curve on every machine
-    tested and never oversubscribes a small one.
+    Two different curves, so the answer depends on where the work is happening.
+
+    On the CPU the transforms contend for memory bandwidth, but most of a
+    panorama is now waiting on the network, so mild oversubscription wins:
+    8.11 panoramas/second at 24 threads against 7.32 at 16. That used to cost
+    throughput -- the tile pool is shared now, so the number of requests in
+    flight no longer scales with this and Google stops throttling us for it.
+
+    With a GPU the transforms leave the CPU entirely and serialise on one
+    device, so extra threads only queue behind each other: 11.54 at 8 threads
+    against 9.38 at 16 and 10.00 at 6.
     """
+    from .accel import device
+
     cores = os.cpu_count() or 4
-    return max(4, min(16, cores // 2))
+    if device() is not None:
+        return 8
+    return max(8, min(24, cores))
 
 
 def _fetcher(args) -> TileFetcher:
@@ -448,7 +457,7 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument("--no-escalate", action="store_true",
                        help="do not retry unreadable panoramas over the full sphere")
     label.add_argument("--quiet", action="store_true", help="no progress output")
-    _add_common(label)
+    _add_common(label, zoom=LABEL_ZOOM)
     label.set_defaults(func=cmd_label)
 
     build = subparsers.add_parser("build-bank", help="build a template bank from labelled panoramas")
@@ -491,7 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--gt", type=Path, required=True, help="map JSON carrying GT_* tags")
     evaluate.add_argument("--save-composites", type=Path, default=None)
     evaluate.add_argument("--no-escalate", action="store_true")
-    _add_common(evaluate)
+    _add_common(evaluate, zoom=LABEL_ZOOM)
     evaluate.set_defaults(func=cmd_evaluate)
 
     return parser

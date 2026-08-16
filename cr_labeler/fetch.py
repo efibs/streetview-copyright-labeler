@@ -105,6 +105,31 @@ class TileFetcher:
         self.retries = retries
         self.timeout = timeout
         self._local = threading.local()
+        self._pool: ThreadPoolExecutor | None = None
+        self._pool_lock = threading.Lock()
+
+    @property
+    def pool(self) -> ThreadPoolExecutor:
+        """One tile pool for the whole run, not one per panorama.
+
+        Building a pool per call cost more than the work it did: a zoom-2 band
+        is four tiles, and spawning threads for them dominated the fetch.  A
+        shared pool also bounds how many requests are in flight across every
+        worker at once, which is the number Google throttles on.
+        """
+        if self._pool is None:
+            with self._pool_lock:
+                if self._pool is None:
+                    self._pool = ThreadPoolExecutor(
+                        max_workers=self.tile_workers, thread_name_prefix="tile"
+                    )
+        return self._pool
+
+    def close(self) -> None:
+        with self._pool_lock:
+            if self._pool is not None:
+                self._pool.shutdown(wait=False)
+                self._pool = None
 
     @property
     def _session(self) -> requests.Session:
@@ -154,6 +179,24 @@ class TileFetcher:
             time.sleep(0.25 * (2**attempt))
         return None
 
+    def _tile_image(self, pano_id: str, x: int, y: int, zoom: int) -> Image.Image | None:
+        """Retrieve one tile and decode it, both inside the worker thread.
+
+        Decoding used to happen serially while stitching; a band of tiles is
+        several megapixels of JPEG, and Pillow drops the GIL to decode, so it
+        parallelises for free by doing it here.
+        """
+        blob = self._tile(pano_id, x, y, zoom)
+        if not blob:
+            return None
+        try:
+            tile = Image.open(io.BytesIO(blob))
+            tile.load()
+        except Exception as exc:  # truncated or non-image payload
+            log.debug("tile %s (%d,%d) decode failed: %s", pano_id, x, y, exc)
+            return None
+        return tile
+
     def fetch(
         self,
         pano_id: str,
@@ -180,23 +223,17 @@ class TileFetcher:
         offset = row_range.start
         ok = 0
 
-        with ThreadPoolExecutor(max_workers=self.tile_workers) as pool:
-            futures = {
-                pool.submit(self._tile, pano_id, x, y, zoom): (x, y) for x, y in wanted
-            }
-            for future in futures:
-                x, y = futures[future]
-                blob = future.result()
-                if not blob:
-                    continue
-                try:
-                    tile = Image.open(io.BytesIO(blob))
-                    tile.load()
-                except Exception as exc:  # truncated or non-image payload
-                    log.debug("tile %s (%d,%d) decode failed: %s", pano_id, x, y, exc)
-                    continue
-                canvas.paste(tile, (x * TILE_PX, (y - offset) * TILE_PX))
-                ok += 1
+        futures = {
+            self.pool.submit(self._tile_image, pano_id, x, y, zoom): (x, y)
+            for x, y in wanted
+        }
+        for future in futures:
+            x, y = futures[future]
+            tile = future.result()
+            if tile is None:
+                continue
+            canvas.paste(tile, (x * TILE_PX, (y - offset) * TILE_PX))
+            ok += 1
 
         pano = Panorama(
             pano_id=pano_id,

@@ -21,6 +21,12 @@ from .geometry import DEFAULT_ZOOM, DETECT_THRESHOLD
 from .metadata import LookupFailed, lookup
 from .signal import highpass
 
+# When to spend a more expensive rung on an apparently-answered reading.  Both
+# thresholds sit at the far tail of what correct readings look like: across 349
+# zoom-2 readings the thinnest margin was 0.006 and the 1st percentile 0.015.
+CONFIDENT_INSTANCES = 2
+CONFIDENT_MARGIN = 0.02
+
 log = logging.getLogger(__name__)
 
 
@@ -93,6 +99,45 @@ class Labeler:
         assert best is not None, "build_composites returns one result per anchor"
         return best
 
+    def _unsettled(self, verdict: Verdict) -> bool:
+        """Whether a reading is worth spending a more expensive rung on.
+
+        Beyond the obvious "found nothing", two readings look answered but are
+        not.  A composite averaged from a *single* instance has nothing to have
+        agreed with, so consensus never vetted it; and a near-tied margin means
+        the runner-up year fit almost as well.  Both were caught in the field:
+        one panorama read 2025 from one instance at margin 0.007, where every
+        higher rung read 2026 from 9, 29 and 58 instances and the glyphs plainly
+        say 2026.
+
+        Neither test fires often -- a single instance is 8% of zoom-2 readings
+        and a margin this thin is 2% -- and the rung is only kept if it scores
+        better, so this can correct such a reading but never invent one.
+        """
+        return (
+            verdict.label in (UNKNOWN, NO_WATERMARK)
+            or verdict.instances < CONFIDENT_INSTANCES
+            or verdict.margin < CONFIDENT_MARGIN
+        )
+
+    def _ladder(self) -> list[tuple[str, int]]:
+        """The (rows, zoom) steps to try when a reading comes back weak.
+
+        Starting below zoom 3 is a throughput trade: zoom 2 needs a quarter of
+        the tiles, which is what the network actually costs, but it finds a
+        median 11 instances against 28 and so reads confidently less often.
+        The extra ``top`` rung at zoom 3 is what makes that safe -- anything
+        zoom 2 could not settle is re-read at exactly the resolution the
+        default uses, before the more expensive full-sphere rungs.
+
+        At the default zoom this returns the same two steps it always has.
+        """
+        base = max(self.zoom, DEFAULT_ZOOM)
+        steps = [("top", DEFAULT_ZOOM)] if self.zoom < DEFAULT_ZOOM else []
+        steps.append(("all", base))
+        steps.append(("all", base + 1))
+        return steps
+
     def label_pano(self, pano_id: str) -> tuple[Verdict, np.ndarray]:
         """Classify one panorama, escalating to the full sphere if unsure."""
         verdict, composite = self._analyse(pano_id, self.rows)
@@ -114,10 +159,10 @@ class Labeler:
         if not (self.escalate and self.rows == "top"):
             return verdict, composite
 
-        for rows, zoom in (("all", None), ("all", self.zoom + 1)):
-            if verdict.label not in (UNKNOWN, NO_WATERMARK):
+        for rows, zoom in self._ladder():
+            if not self._unsettled(verdict):
                 break
-            log.debug("escalating %s to rows=%s zoom=%s", pano_id, rows, zoom or self.zoom)
+            log.debug("escalating %s to rows=%s zoom=%s", pano_id, rows, zoom)
             retry, retry_composite = self._analyse(pano_id, rows, zoom)
             if retry.quality > verdict.quality:
                 verdict, composite = retry, retry_composite

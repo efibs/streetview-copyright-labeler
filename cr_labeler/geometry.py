@@ -46,6 +46,16 @@ MAX_INSTANCES = 400
 TILE_PX = 512
 DEFAULT_ZOOM = 3
 
+# What `label` starts at.  A zoom-2 band is four tiles against sixteen, and
+# tiles are what the network actually costs; it finds fewer instances, so it
+# settles on its own about 65% of the time and the rest fall through to zoom 3
+# unchanged.  Effective cost is ~9.7 tiles per panorama instead of 17.6.  Held
+# to identical answers on all 543 hand-labelled panoramas, 20/20 on the ground
+# truth, and 0 disagreements against zoom 3 over 1200 live Gen-4 panoramas.
+# Bank building stays at DEFAULT_ZOOM, which is the resolution templates were
+# cut at.
+LABEL_ZOOM = 2
+
 
 def pano_grid(zoom: int) -> tuple[int, int]:
     """Return ``(cols, rows)`` of the 512 px tile grid at ``zoom``."""

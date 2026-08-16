@@ -136,6 +136,17 @@ def _kernel_spectrum(template: np.ndarray, shape: tuple[int, int]) -> np.ndarray
     return cached
 
 
+def correlator_for(field: np.ndarray):
+    """A correlator for ``field``, on the GPU when one is usable.
+
+    The two implementations are interchangeable: same interface, and the same
+    answers to within FFT round-off. See :mod:`cr_labeler.accel`.
+    """
+    from .accel import CudaCorrelator, device
+
+    return CudaCorrelator(field) if device() is not None else Correlator(field)
+
+
 @dataclass(frozen=True)
 class Peak:
     """One detected watermark instance."""
