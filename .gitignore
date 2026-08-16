@@ -22,7 +22,9 @@ datasets/generated/
 # saved composite PNGs
 composites/
 # output of `cr-label label`
+outputs/
 *_tagged.json
+*_labeled.json
 # per-panorama score dumps; they go stale as the bank changes
 *-report.csv
 

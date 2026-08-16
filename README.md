@@ -120,11 +120,27 @@ nothing — it is good enough to *find* the stamps, and the data takes over from
 
 ## Install
 
+**These instructions assume [conda](https://docs.conda.io/projects/conda/en/stable/) is installed**
+— either [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install) (just the
+package manager) or Anaconda. Check with `conda --version`; if that fails, install Miniconda first.
+Conda is how this was developed and what the commands below are written for.
+
 ```bash
 conda create -n cr_labeler python=3.12 numpy pillow requests tqdm pytest
 conda activate cr_labeler
 pip install -e .
 ```
+
+Nothing here actually *requires* conda — the dependencies are ordinary PyPI packages, so any Python
+3.10+ environment works. With `venv` instead:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -e .
+```
+
+Either way, `conda activate cr_labeler` (or re-sourcing the venv) is needed in every new shell before
+`cr-label` is on the PATH.
 
 Only `numpy`, `pillow`, `requests` and `tqdm`. No OpenCV. Tile fetching needs no API key.
 
