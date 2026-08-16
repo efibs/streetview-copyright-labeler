@@ -157,7 +157,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--total", type=int, default=3600, help="locations across both sets")
     parser.add_argument("--test-fraction", type=float, default=0.35)
-    parser.add_argument("--out-dir", type=Path, default=HERE.parent / "datasets")
+    parser.add_argument("--out-dir", type=Path, default=HERE.parent / "datasets" / "generated")
     parser.add_argument(
         "--countries",
         default="",

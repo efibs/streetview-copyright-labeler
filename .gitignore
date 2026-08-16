@@ -14,6 +14,11 @@ out/
 # harvest output awaiting labelling
 clusters/
 datasets/clusters/
+# Vali-generated location sets: reproducible from vali/make_sets.py, and large.
+# datasets/ itself stays tracked -- labeled.json is hand-made and irreplaceable,
+# and to_label*.json is what accuracy_report.py uses to tell the unbiased rows
+# from the adversarial ones.
+datasets/generated/
 # saved composite PNGs
 composites/
 # output of `cr-label label`
@@ -26,6 +31,8 @@ vali/*-locations.json
 vali/stratum-*.json
 vali/band-*
 vali/probe-*
+vali/scale*
+vali/*-pilot*
 vali/*-country-distribution.txt
 vali/*-subdivision-distribution.txt
 vali/download.log

@@ -1,0 +1,13 @@
+{
+  "countryCodes": ["BA", "RS", "ME", "MK", "AL"],
+  "distributionStrategy": {
+    "key": "FixedCountByMaxMinDistance",
+    "locationCountGoal": 108000,
+    "minMinDistance": 50
+  },
+  "globalLocationFilter": "DescriptionLength gt -1 and Year gte 2023",
+  "output": {
+    "panoVerificationStrategy": "Newest",
+    "locationTags": ["Year", "Month", "CountryCode"]
+  }
+}

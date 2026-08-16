@@ -75,8 +75,8 @@ def pano_date(row: dict) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--locations", type=Path, default=Path("datasets/test.json"))
-    parser.add_argument("--report", type=Path, default=Path("datasets/test-report.csv"))
+    parser.add_argument("--locations", type=Path, default=Path("datasets/generated/test.json"))
+    parser.add_argument("--report", type=Path, default=Path("datasets/generated/test-report.csv"))
     parser.add_argument("--out", type=Path, default=Path("datasets/to_label.json"))
     parser.add_argument("--random", type=int, default=60, help="unbiased baseline block")
     parser.add_argument("--per-target", type=int, default=35, help="size of each targeted block")

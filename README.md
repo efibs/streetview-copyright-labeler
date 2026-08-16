@@ -240,13 +240,22 @@ rest of the batch continues.
 Built with [Vali](https://github.com/slashP/Vali), which generates GeoGuessr locations and resolves
 each to a verified `panoId`.
 
+**Tracked** — small, and not reproducible by running anything:
+
 | File | n | What it is |
 |---|---|---|
-| `datasets/train.json` | 4,330 | Used to build the template bank |
-| `datasets/test.json` | 2,419 | Held out, 18 countries |
-| `datasets/test2.json` | 5,860 | Held out, all 31 countries |
-| `datasets/gen1.json` | 650 | First-generation panoramas, verified by resolution |
-| `datasets/labeled.json` | 543 | **Hand-labelled ground truth** |
+| `datasets/labeled.json` | 543 | **Hand-labelled ground truth.** Every accuracy claim rests on it |
+| `datasets/to_label*.json` | 543 | The label requests. `accuracy_report.py` reads them to tell the unbiased rows from the adversarial ones |
+
+**Not tracked** — `datasets/generated/` is gitignored, since `vali/make_sets.py` reproduces it and it
+runs to tens of megabytes:
+
+| File | n | What it is |
+|---|---|---|
+| `generated/train.json` | 4,330 | Used to build the template bank |
+| `generated/test.json` | 2,419 | Held out, 18 countries |
+| `generated/test2.json` | 5,860 | Held out, all 31 countries |
+| `generated/gen1.json` | 650 | First-generation panoramas, verified by resolution |
 
 Train and test are split from one pool by a hash of the panorama id, so they are guaranteed disjoint
 and identically distributed.
@@ -291,7 +300,7 @@ So generation is taken from the panorama's true resolution, which Google's metad
 | 16384 × 8192 | 4 |
 
 The same metadata lists neighbouring panorama ids, so crawling outward from one confirmed Gen 1
-panorama collects a whole region. `datasets/gen1.json` was built that way from two seeds (South
+panorama collects a whole region. `datasets/generated/gen1.json` was built that way from two seeds (South
 Australia and Missouri), every entry verified at 3328 × 1664.
 
 **Gen 1 reads better than average — 649/650 (99.8%) yield a year, none come back `None`** — because
@@ -304,7 +313,7 @@ the watermark is composited at a fixed pixel size regardless of the imagery unde
 ### Auditing
 
 ```bash
-python vali/audit.py --locations datasets/test.json --report r.csv --sample 40
+python vali/audit.py --locations datasets/generated/test.json --report r.csv --sample 40
 python vali/accuracy_report.py --report r.csv     # against datasets/labeled.json
 ```
 
