@@ -70,6 +70,73 @@ def default_workers() -> int:
     return max(8, min(24, cores))
 
 
+class _PlainProgress:
+    """Stand-in for the tqdm bar, used only if tqdm is not installed.
+
+    Keeps a long run readable on an environment built before tqdm was a
+    dependency, rather than failing on the import.
+    """
+
+    def __init__(self, total: int, disable: bool):
+        self.total = total
+        self.disable = disable
+        self.n = 0
+        self.started = time.time()
+        self.postfix = ""
+
+    def set_postfix_str(self, text: str, refresh: bool = True) -> None:
+        self.postfix = text
+
+    def update(self, n: int = 1) -> None:
+        self.n += n
+        if self.disable:
+            return
+        elapsed = time.time() - self.started
+        rate = self.n / max(elapsed, 1e-6)
+        remaining = (self.total - self.n) / rate if rate else 0.0
+        print(
+            f"\r  {self.n}/{self.total}  {rate:5.2f} pano/s  "
+            f"eta {remaining / 60:5.1f} min  {self.postfix}",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def close(self) -> None:
+        if not self.disable:
+            print(file=sys.stderr)
+
+    def __enter__(self) -> _PlainProgress:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+def _progress_bar(total: int, disable: bool):
+    """A progress bar over panoramas, with an estimate of the time left.
+
+    ``smoothing`` is turned well down from tqdm's default.  The default weights
+    the last few panoramas heavily, and per-panorama cost here is genuinely
+    spiky -- a reading that escalates to zoom 4 does eight times the work of one
+    that settles at zoom 2 -- so a responsive estimate would swing wildly over a
+    multi-hour run.  Near zero it averages over the whole run instead, which is
+    what makes the estimate worth reading.
+    """
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        return _PlainProgress(total, disable)
+
+    return tqdm(
+        total=total,
+        disable=disable,
+        unit="pano",
+        smoothing=0.02,
+        bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
+    )
+
+
 def _fetcher(args) -> TileFetcher:
     return TileFetcher(TileCache(args.cache))
 
@@ -123,25 +190,24 @@ def cmd_label(args) -> int:
     )
 
     started = time.time()
-    done = 0
+    seen: Counter[str] = Counter()
 
-    def progress(result: LabelResult) -> None:
-        nonlocal done
-        done += 1
-        if args.quiet:
-            return
-        rate = done / max(time.time() - started, 1e-6)
-        print(
-            f"\r  {done}/{len(document.locations)}  {rate:5.2f} pano/s  "
-            f"last: {result.label:8s}",
-            end="",
-            file=sys.stderr,
-            flush=True,
+    with _progress_bar(len(document.locations), disable=args.quiet) as bar:
+
+        def progress(result: LabelResult) -> None:
+            # Only the two counts worth abandoning a long run over; the full
+            # breakdown is printed at the end either way.
+            seen[result.label] += 1
+            if not result.ok:
+                seen["_error"] += 1
+            bar.set_postfix_str(
+                f"unknown {seen[UNKNOWN]}, errors {seen['_error']}", refresh=False
+            )
+            bar.update(1)
+
+        results = labeler.label_all(
+            document.locations, workers=args.workers, progress=progress
         )
-
-    results = labeler.label_all(document.locations, workers=args.workers, progress=progress)
-    if not args.quiet:
-        print(file=sys.stderr)
     elapsed = time.time() - started
 
     by_index = {r.index: r for r in results}

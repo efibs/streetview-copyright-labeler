@@ -121,12 +121,12 @@ nothing — it is good enough to *find* the stamps, and the data takes over from
 ## Install
 
 ```bash
-conda create -n cr_labeler python=3.12 numpy pillow requests pytest
+conda create -n cr_labeler python=3.12 numpy pillow requests tqdm pytest
 conda activate cr_labeler
 pip install -e .
 ```
 
-Only `numpy`, `pillow` and `requests`. No OpenCV. Tile fetching needs no API key.
+Only `numpy`, `pillow`, `requests` and `tqdm`. No OpenCV. Tile fetching needs no API key.
 
 **Optional GPU.** If PyTorch with a working CUDA device happens to be installed, the correlation runs
 there instead — about 1.4x end to end, and nothing about it is required. There is no GPU-only code
@@ -146,6 +146,15 @@ cr-label label in.json -o out.json --report r.csv --cache cache
 cr-label evaluate --gt CR_GT.json                           # score against GT_* tags
 ```
 
+A long run reports progress and how much of it is left:
+
+```
+  47%|████▋     | 47562/101233 [1:12:04<1:21:19, 11.0pano/s, unknown 12, errors 0]
+```
+
+The two counts are the ones worth abandoning a run over — the full breakdown by year is
+printed at the end. `--quiet` turns the bar off.
+
 | Option | Default | Meaning |
 |---|---|---|
 | `--report FILE.csv` | off | Per-panorama scores: confidence, instances, style, margins |
@@ -155,6 +164,7 @@ cr-label evaluate --gt CR_GT.json                           # score against GT_*
 | `--rows top\|all` | `top` | `top` reads the upper hemisphere: ~96% of stamps, half the bytes |
 | `--no-escalate` | off | Skip retries — much faster, at real cost to coverage |
 | `--save-composites DIR` | off | Write each averaged watermark as a PNG, to check reads by eye |
+| `--quiet` | off | No progress bar |
 | `--api-key-file PATH` | — | Only for rows with no `panoId`; see below |
 
 ### Throughput
