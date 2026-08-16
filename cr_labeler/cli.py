@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ctypes
+import gc
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from collections import Counter
+from contextlib import nullcontext
 from pathlib import Path
 
 from .bank import DEFAULT_BANK, Bank
 from .build import build_seed_bank, harvest
+from .checkpoint import Checkpoint, CheckpointMismatch
 from .classify import UNKNOWN
 from .config import MissingApiKey, resolve_api_key
 from .discover import BootstrapFailed
@@ -189,86 +194,318 @@ def cmd_label(args) -> int:
         escalate=not args.no_escalate,
     )
 
-    started = time.time()
-    seen: Counter[str] = Counter()
-
-    with _progress_bar(len(document.locations), disable=args.quiet) as bar:
-
-        def progress(result: LabelResult) -> None:
-            # Only the two counts worth abandoning a long run over; the full
-            # breakdown is printed at the end either way.
-            seen[result.label] += 1
-            if not result.ok:
-                seen["_error"] += 1
-            bar.set_postfix_str(
-                f"unknown {seen[UNKNOWN]}, errors {seen['_error']}", refresh=False
-            )
-            bar.update(1)
-
-        results = labeler.label_all(
-            document.locations, workers=args.workers, progress=progress
-        )
-    elapsed = time.time() - started
-
-    by_index = {r.index: r for r in results}
-    for location in document.locations:
-        result = by_index.get(location.index)
-        if result:
-            location.apply_tag(result.label)
-
     output = args.output or args.input.with_name(f"{args.input.stem}_tagged.json")
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else Path(f"{output}.progress")
+    checkpoint = Checkpoint(
+        checkpoint_path,
+        header={
+            "input": str(args.input.resolve()),
+            "rows": len(document.locations),
+            "zoom": args.zoom,
+            "rows_mode": args.rows,
+            "escalate": not args.no_escalate,
+        },
+    )
+
+    if args.restart and checkpoint_path.exists():
+        checkpoint_path.unlink()
+        log.info("--restart: discarded %s", checkpoint_path)
+
+    try:
+        already = checkpoint.load()
+    except CheckpointMismatch as exc:
+        log.error("%s", exc)
+        log.error("pass --restart to discard it, or --checkpoint PATH to keep them apart")
+        return 2
+
+    counts: Counter[str] = Counter()
+    # Only the first few are ever printed, so only the first few are kept: if
+    # something systematic goes wrong -- the network drops, Google starts
+    # refusing -- every one of 900k rows fails, and holding all those messages
+    # to report ten of them is exactly the wrong thing to do while memory is
+    # already the concern.
+    failures = 0
+    examples: list[tuple[int, str]] = []
+    KEEP_EXAMPLES = 20
+
+    def note_failure(index: int, message: str) -> None:
+        nonlocal failures
+        failures += 1
+        if len(examples) < KEEP_EXAMPLES:
+            examples.append((index, message))
+
+    for record in already.values():
+        counts[record.label] += 1
+        if record.error:
+            note_failure(record.index, record.error)
+    if already:
+        print(f"resuming: {len(already)} of {len(document.locations)} already done "
+              f"in {checkpoint_path}")
+
+    by_index = {loc.index: loc for loc in document.locations}
+    for record in already.values():
+        location = by_index.get(record.index)
+        if location:
+            location.apply_tag(record.label)
+
+    todo = [loc for loc in document.locations if loc.index not in already]
+    if not todo:
+        print("nothing left to label")
+
+    stopping = _install_stop_handler()
+    disk = _DiskGuard(
+        [checkpoint_path.parent, Path(args.cache) if args.cache else None],
+        floor_gb=args.min_free_gb,
+    )
+    disk.warn_if_tight(len(todo), cache_on=bool(args.cache))
+    disk.check(force=True)
+    if disk.exhausted():
+        log.error("not starting: %s", disk.reason)
+        log.error("free some space, or lower --min-free-gb")
+        return 1
+
+    started = time.time()
+    done_now = 0
+    report = _ReportWriter(Path(args.report)) if args.report else None
+
+    with checkpoint, (report or nullcontext()):
+        with _progress_bar(len(document.locations), disable=args.quiet) as bar:
+            bar.update(len(already))
+
+            def should_stop() -> bool:
+                return stopping() or disk.exhausted()
+
+            for result in labeler.label_stream(
+                todo, workers=args.workers, stop=should_stop
+            ):
+                # Everything durable happens before the composite is dropped,
+                # and the composite is dropped before the next result arrives --
+                # which is what keeps memory flat over 900k rows.
+                checkpoint.record(result.index, result.label, result.pano_id, result.error)
+                location = by_index.get(result.index)
+                if location:
+                    location.apply_tag(result.label)
+                if report:
+                    report.write(result)
+                if args.save_composites and result.composite is not None and result.pano_id:
+                    save_composite(
+                        result.composite,
+                        Path(args.save_composites) / f"{result.label}_{result.pano_id}.png",
+                    )
+                result.composite = None
+
+                counts[result.label] += 1
+                if not result.ok:
+                    note_failure(result.index, result.error or "")
+                done_now += 1
+                if done_now % 2000 == 0:
+                    _reclaim()
+                disk.check()
+                bar.set_postfix_str(
+                    f"unknown {counts[UNKNOWN]}, errors {failures}", refresh=False
+                )
+                bar.update(1)
+
+    elapsed = time.time() - started
+    labelled = len(already) + done_now
+    interrupted = labelled < len(document.locations)
+
     document.save(output)
 
-    if args.save_composites:
-        for result in results:
-            if result.composite is not None and result.pano_id:
-                save_composite(
-                    result.composite,
-                    Path(args.save_composites) / f"{result.label}_{result.pano_id}.png",
-                )
-
-    if args.report:
-        _write_report(Path(args.report), results)
-
-    counts = Counter(r.label for r in results)
-    errors = [r for r in results if not r.ok]
-    print(f"\ntagged {len(results)} locations in {elapsed:.1f}s "
-          f"({len(results) / max(elapsed, 1e-6):.2f} pano/s)")
+    print(f"\nlabelled {done_now} locations in {elapsed:.1f}s "
+          f"({done_now / max(elapsed, 1e-6):.2f} pano/s)")
     for label, count in sorted(counts.items()):
         print(f"  CR_{label:<9s} {count}")
-    if errors:
-        print(f"\n{len(errors)} could not be processed:")
-        for result in errors[:10]:
-            print(f"  row {result.index}: {result.error.splitlines()[0]}")
-        if len(errors) > 10:
-            print(f"  ... and {len(errors) - 10} more")
+    if failures:
+        print(f"\n{failures} could not be processed:")
+        for index, message in examples[:10]:
+            print(f"  row {index}: {message.splitlines()[0] if message else ''}")
+        if failures > 10:
+            print(f"  ... and {failures - 10} more")
+
     print(f"\nwrote {output}")
+    if interrupted:
+        remaining = len(document.locations) - labelled
+        print(f"\n{remaining} locations still unlabelled -- {disk.reason or 'run was interrupted'}.")
+        print("The rest are saved. Run the same command again to carry on where it stopped:")
+        print(f"  progress is in {checkpoint_path}")
+        return 1
+
+    print(f"complete; {checkpoint_path.name} can be deleted")
     return 0
 
 
-def _write_report(path: Path, results: list[LabelResult]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            ["index", "panoId", "label", "confidence", "instances",
-             "style", "quality", "digit_score", "margin", "ground_truth", "error"]
+class _ReportWriter:
+    """Streams the per-panorama CSV instead of holding every row to the end.
+
+    Appends, so a resumed run adds to the report its earlier attempt started
+    rather than truncating it.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fresh = not path.exists() or path.stat().st_size == 0
+        self._handle = path.open("a", newline="", encoding="utf-8")
+        self._writer = csv.writer(self._handle)
+        if fresh:
+            self._writer.writerow(REPORT_COLUMNS)
+
+    def write(self, result: LabelResult) -> None:
+        self._writer.writerow(_report_row(result))
+
+    def __enter__(self) -> _ReportWriter:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._handle.close()
+
+
+def _reclaim() -> None:
+    """Collect cycles and hand freed arenas back to the OS.
+
+    Resident memory here is dominated by the panoramas in flight, which is set
+    by ``--workers`` and not by how many rows have been processed -- measured
+    flat at 4.58, 4.54 and 4.91 GB across the three thirds of a run.  What can
+    still creep is glibc holding freed arenas: this work allocates and frees
+    multi-megabyte buffers on many threads, which is the pattern that fragments
+    them.  Twice an hour at full speed, and a few milliseconds each time.
+
+    ``malloc_trim`` is glibc's, so its absence is not an error anywhere else.
+    """
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _install_stop_handler():
+    """Turn the first Ctrl-C into a clean stop, and the second into a quit.
+
+    A run this long will sometimes need stopping on purpose.  The default
+    KeyboardInterrupt would tear down mid-write; this lets the work in flight
+    finish and be recorded, so stopping costs seconds rather than the batch.
+    """
+    asked = False
+
+    def stopping() -> bool:
+        return asked
+
+    def handler(signum, frame):
+        nonlocal asked
+        if asked:  # they mean it
+            raise KeyboardInterrupt
+        asked = True
+        print(
+            "\nstopping -- finishing what is in flight, then saving. "
+            "Ctrl-C again to quit now.",
+            file=sys.stderr,
         )
-        for result in results:
-            verdict = result.verdict
-            writer.writerow([
-                result.index,
-                result.pano_id or "",
-                result.label,
-                f"{verdict.confidence:.3f}" if verdict else "",
-                verdict.instances if verdict else "",
-                verdict.style if verdict else "",
-                f"{verdict.quality:.3f}" if verdict else "",
-                f"{verdict.digit_score:.3f}" if verdict else "",
-                f"{verdict.margin:.3f}" if verdict else "",
-                result.ground_truth or "",
-                (result.error or "").splitlines()[0] if result.error else "",
-            ])
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, handler)
+        except ValueError:  # not on the main thread; leave the default
+            pass
+    return stopping
+
+
+class _DiskGuard:
+    """Stops the run cleanly before the disk fills, rather than after.
+
+    Running out of space mid-write is the failure that corrupts things: the
+    checkpoint, the cache and the output all want the same volume.  Stopping
+    while there is still room leaves every one of them intact and resumable.
+    """
+
+    # Seconds between checks.  Rate-limiting by row count was wrong: a disk can
+    # fill in seconds, and a short run could finish having never looked.
+    INTERVAL = 5.0
+
+    def __init__(self, paths, floor_gb: float):
+        seen = {}
+        for path in paths:
+            if path is None:
+                continue
+            try:
+                resolved = Path(path).resolve()
+                resolved.mkdir(parents=True, exist_ok=True)
+                seen[os.stat(resolved).st_dev] = resolved
+            except OSError:
+                continue
+        self.paths = list(seen.values())
+        self.floor = floor_gb * 1e9
+        self.reason: str | None = None
+        self._last_check = 0.0
+
+    def free(self) -> float:
+        lowest = float("inf")
+        for path in self.paths:
+            try:
+                stats = os.statvfs(path)
+            except OSError:
+                continue
+            lowest = min(lowest, stats.f_bavail * stats.f_frsize)
+        return 0.0 if lowest == float("inf") else lowest
+
+    def warn_if_tight(self, todo: int, cache_on: bool) -> None:
+        free = self.free()
+        if not cache_on or not todo:
+            return
+        # Measured over the tiles this machine has cached: ~37 KB each, and
+        # ~9.7 tiles per panorama once escalation is counted.
+        projected = todo * 9.7 * 37_000
+        if projected > free * 0.8:
+            print(
+                f"\nwarning: caching tiles for {todo} panoramas needs roughly "
+                f"{projected / 1e9:.0f} GB and only {free / 1e9:.0f} GB is free.\n"
+                "         The cache only helps runs that revisit the same panoramas, "
+                "and resuming\n"
+                "         does not revisit them -- for a single large pass, drop "
+                "--cache.\n"
+                f"         The run will stop cleanly and stay resumable at "
+                f"{self.floor / 1e9:.0f} GB free.",
+                file=sys.stderr,
+            )
+
+    def check(self, force: bool = False) -> None:
+        if self.reason:
+            return
+        now = time.time()
+        if not force and now - self._last_check < self.INTERVAL:
+            return
+        self._last_check = now
+        free = self.free()
+        if free < self.floor:
+            self.reason = f"stopped with only {free / 1e9:.1f} GB of disk free"
+            log.error("%s -- saving and stopping while everything is still intact", self.reason)
+
+    def exhausted(self) -> bool:
+        return self.reason is not None
+
+
+REPORT_COLUMNS = [
+    "index", "panoId", "label", "confidence", "instances",
+    "style", "quality", "digit_score", "margin", "ground_truth", "error",
+]
+
+
+def _report_row(result: LabelResult) -> list:
+    verdict = result.verdict
+    return [
+        result.index,
+        result.pano_id or "",
+        result.label,
+        f"{verdict.confidence:.3f}" if verdict else "",
+        verdict.instances if verdict else "",
+        verdict.style if verdict else "",
+        f"{verdict.quality:.3f}" if verdict else "",
+        f"{verdict.digit_score:.3f}" if verdict else "",
+        f"{verdict.margin:.3f}" if verdict else "",
+        result.ground_truth or "",
+        (result.error or "").splitlines()[0] if result.error else "",
+    ]
 
 
 # --- build-bank -----------------------------------------------------------
@@ -523,6 +760,18 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument("--no-escalate", action="store_true",
                        help="do not retry unreadable panoramas over the full sphere")
     label.add_argument("--quiet", action="store_true", help="no progress output")
+    label.add_argument(
+        "--checkpoint", type=Path, default=None,
+        help="progress file for resuming (default: alongside the output, .progress)",
+    )
+    label.add_argument(
+        "--restart", action="store_true",
+        help="discard any existing progress and label every location again",
+    )
+    label.add_argument(
+        "--min-free-gb", type=float, default=5.0,
+        help="stop cleanly, still resumable, when disk free space falls below this",
+    )
     _add_common(label, zoom=LABEL_ZOOM)
     label.set_defaults(func=cmd_label)
 

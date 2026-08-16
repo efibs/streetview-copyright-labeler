@@ -8,6 +8,7 @@ carried through untouched, so a tagged map stays a valid map.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,14 +111,31 @@ class GeoGuessrMap:
         return cls(document=document, locations=locations)
 
     def save(self, path: Path) -> None:
-        """Write the document back, preserving the compact one-per-line layout."""
+        """Write the document back, preserving the compact one-per-line layout.
+
+        Streamed a row at a time and written to a temporary file that is renamed
+        into place at the end.  Both matter at size: serialising 900k rows into
+        one string wanted about half a gigabyte all at once, at the very end of
+        a run that had already taken most of a day, and writing in place meant a
+        failure part-way through left a truncated document where the previous
+        one had been.  A rename is atomic, so the output file is either the old
+        one or the complete new one, never half of either.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         entries = self.document.get("customCoordinates", [])
         head = {k: v for k, v in self.document.items() if k != "customCoordinates"}
-        lines = [json.dumps(entry, ensure_ascii=False, separators=(",", ":")) for entry in entries]
-
         prefix = json.dumps(head, ensure_ascii=False, separators=(",", ":"))[1:-1]
-        opening = "{" + (prefix + "," if prefix else "") + '"customCoordinates":[\n'
-        path.write_text(opening + ",\n".join(lines) + "\n]}", encoding="utf-8")
+
+        temporary = path.with_name(path.name + ".part")
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write("{" + (prefix + "," if prefix else "") + '"customCoordinates":[\n')
+            for position, entry in enumerate(entries):
+                if position:
+                    handle.write(",\n")
+                handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n]}")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)

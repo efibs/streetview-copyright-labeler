@@ -181,6 +181,45 @@ printed at the end. `--quiet` turns the bar off.
 | `--no-escalate` | off | Skip retries — much faster, at real cost to coverage |
 | `--save-composites DIR` | off | Write each averaged watermark as a PNG, to check reads by eye |
 | `--quiet` | off | No progress bar |
+| `--checkpoint FILE` | `<output>.progress` | Where progress is recorded, for resuming |
+| `--restart` | off | Ignore existing progress and label everything again |
+| `--min-free-gb N` | 5 | Stop cleanly, still resumable, before the disk fills |
+
+### Very large runs
+
+A run of several hundred thousand locations takes most of a day, which is long enough that finishing
+is not the only thing to design for. Every result is appended to a progress file the moment it
+arrives, so **the same command run again picks up where it stopped**:
+
+```bash
+cr-label label big.json -o out.json     # dies at 600k of 900k
+cr-label label big.json -o out.json     # "resuming: 600123 of 900000 already done"
+```
+
+Nothing needs recovering by hand. Verified by killing a live run with `SIGKILL` mid-flight and
+resuming it: the finished document was identical, row for row, to the same input labelled in one go.
+
+| Failure | What happens |
+|---|---|
+| Killed, crashed, power cut | Every completed row is already on disk; rerun to continue |
+| Ctrl-C | Finishes what is in flight, saves, prints how to resume. A second Ctrl-C quits at once |
+| Disk fills | Stops *before* it fills, while the output and progress file are still intact |
+| One panorama fails unexpectedly | Recorded as an error, run continues — nothing kills a whole batch |
+
+Memory does not grow with the size of the input. Results are streamed and written out one at a time
+rather than collected to the end, and the output document is serialised row by row into a temporary
+file that is renamed into place, so the finished file is never half-written. What memory *is* used
+scales with `--workers`, not with the number of locations: measured over a long run at the default
+24 workers it sat at 4.5 GB, peaking at 6.4 GB, with the three thirds of the run at 4.60, 4.50 and
+4.52 GB. Lower `--workers` if that is too much for the machine.
+
+**Leave `--cache` off for a single large pass.** The cache only helps runs that revisit the same
+panoramas, and resuming does not revisit them — it skips them. At ~9.7 tiles per panorama and ~37 KB
+a tile, caching 900k locations would want roughly 320 GB for no benefit. The run warns if the cache
+looks likely to outgrow the free space.
+
+If a progress file describes different work — another input, another zoom — it is refused rather than
+half-applied. Use `--restart` to discard it, or `--checkpoint` to keep two runs apart.
 | `--api-key-file PATH` | — | Only for rows with no `panoId`; see below |
 
 ### Throughput
@@ -424,6 +463,7 @@ ruff check .
 | `build.py` / `discover.py` | Bootstrapping and extending a bank (build time only) |
 | `panometa.py` | Panorama dimensions and neighbours, for generation detection |
 | `fetch.py` | Tile retrieval, stitching, retry, cache |
+| `checkpoint.py` | Append-only record of finished rows, so a killed run resumes |
 | `labeler.py` | Orchestration and the escalation ladder |
 | `geoguessr_io.py` | Reading and writing the map JSON |
 | `config.py` / `metadata.py` | API key handling and coordinate lookup |

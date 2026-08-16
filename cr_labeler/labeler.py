@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -204,6 +205,60 @@ class Labeler:
                 error=str(exc),
                 ground_truth=location.ground_truth(),
             )
+        except Exception as exc:  # one bad row must never end the run
+            # The three above are the failures we understand and phrase well.
+            # This is for the ones we do not: a decoder rejecting a malformed
+            # tile, a socket error escaping the retry loop, anything at all.
+            # Over 900k panoramas a once-in-a-million failure is expected, and
+            # letting it propagate would throw away every hour already spent.
+            # KeyboardInterrupt and SystemExit are BaseException, so a Ctrl-C
+            # still stops the run rather than being swallowed here.
+            log.exception("unexpected failure on %s", location.describe())
+            return LabelResult(
+                index=location.index,
+                pano_id=pano_id,
+                label=UNKNOWN,
+                verdict=None,
+                error=str(exc),
+                ground_truth=location.ground_truth(),
+            )
+
+    def label_stream(
+        self,
+        locations: Iterable[Location],
+        workers: int = 8,
+        stop=None,
+    ) -> Iterator[LabelResult]:
+        """Yield results as they finish, holding only a bounded number at once.
+
+        ``ThreadPoolExecutor.map`` submits the whole input immediately and
+        returns results only in order, so a 900k run would build 900k futures
+        before doing any work.  This keeps a small window in flight instead, so
+        memory stays flat however long the input is, and hands each result back
+        the moment it is ready -- which is what lets the caller checkpoint it.
+
+        ``stop`` is polled between batches.  When it returns true no further
+        work is submitted, but everything already in flight is drained and
+        yielded, so a cancelled run still records what it finished.
+        """
+        pending: set[Future[LabelResult]] = set()
+        # Enough to keep every worker fed while one is being handed back.
+        limit = max(workers * 4, workers + 1)
+        remaining = iter(locations)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while True:
+                if not (stop and stop()):
+                    while len(pending) < limit:
+                        location = next(remaining, None)
+                        if location is None:
+                            break
+                        pending.add(pool.submit(self.label_one, location))
+                if not pending:
+                    return
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    yield future.result()
 
     def label_all(
         self,
@@ -211,12 +266,16 @@ class Labeler:
         workers: int = 8,
         progress=None,
     ) -> list[LabelResult]:
+        """Every result at once, in input order.
+
+        Fine for a map that fits in memory; ``label_stream`` is what a very
+        large one should use, since this holds every composite until the end.
+        """
         results: list[LabelResult] = []
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for result in pool.map(self.label_one, locations):
-                results.append(result)
-                if progress:
-                    progress(result)
+        for result in self.label_stream(locations, workers=workers):
+            results.append(result)
+            if progress:
+                progress(result)
         return sorted(results, key=lambda r: r.index)
 
 

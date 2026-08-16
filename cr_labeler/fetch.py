@@ -7,6 +7,7 @@ which is why the header is set unconditionally.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import logging
@@ -62,6 +63,7 @@ class TileCache:
 
     def __init__(self, root: Path | None):
         self.root = Path(root) if root else None
+        self.writable = self.root is not None
         if self.root:
             self.root.mkdir(parents=True, exist_ok=True)
 
@@ -80,14 +82,26 @@ class TileCache:
             return None
 
     def put(self, pano_id: str, x: int, y: int, zoom: int, blob: bytes) -> None:
-        if not self.root:
+        if not self.root or not self.writable:
             return
         path = self._path(pano_id, x, y, zoom)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(blob)
         except OSError as exc:  # a broken cache must never break a run
-            log.debug("tile cache write failed: %s", exc)
+            if exc.errno == errno.ENOSPC:
+                # Every subsequent tile would fail the same way and say so.
+                # Stop writing, keep reading what is already there, and let the
+                # run continue -- a full disk should cost the cache, not the
+                # twenty hours of work behind it.
+                self.writable = False
+                log.warning(
+                    "disk full at %s -- tile caching disabled for the rest of "
+                    "this run; labelling continues",
+                    self.root,
+                )
+            else:
+                log.debug("tile cache write failed: %s", exc)
 
 
 class TileFetcher:
