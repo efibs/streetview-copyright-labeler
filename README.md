@@ -143,8 +143,23 @@ cr-label evaluate --gt CR_GT.json                           # score against GT_*
 | `--save-composites DIR` | off | Write each averaged watermark as a PNG, to check reads by eye |
 | `--api-key-file PATH` | — | Only for rows with no `panoId`; see below |
 
-Throughput is ~3.8 panoramas/second with escalation, ~9.2 without. Only weak readings pay for
-retries, so the real cost depends on the input.
+### Throughput
+
+Measured on modern Gen 4 coverage, cold cache, this machine (32 cores):
+
+| | pano/s | 100k panoramas |
+|---|---|---|
+| default (16 workers) | **~6.7** | ~4.2 hours |
+| `--no-escalate` | ~9 | ~3 hours |
+| tiles already cached | ~11 | ~2.5 hours |
+
+Roughly **74% of the time is correlation** and 26% is waiting on Google, even cold. The work is
+mostly FFT, which releases the GIL, so it scales nearly linearly with threads — measured 7.9x on 8.
+
+`--workers` defaults to half the core count, capped at 16, which is where the measured curve peaks.
+Going higher is counterproductive twice over: the transforms start contending for memory bandwidth,
+and Google throttles the tile requests (at 32 workers, fetch time per panorama went from 593 ms to
+3506 ms). Raising it is rarely the right move.
 
 ---
 

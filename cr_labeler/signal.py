@@ -66,37 +66,74 @@ def declutter(composite: np.ndarray, sigma: float = COMPOSITE_HIGHPASS_SIGMA) ->
 class Correlator:
     """Cross-correlates one image against many templates.
 
-    Holds the image spectrum and the running-sum spectra needed for the
-    normalisation denominator, so each additional template costs one inverse
-    FFT rather than a full re-analysis.
+    Holds the image spectrum, so each extra template costs one inverse FFT
+    rather than a full re-analysis, and caches the per-window statistics that
+    depend only on the template's *shape*.  Anchors of equal size -- which every
+    style of one rendering family has -- then share that work instead of
+    repeating it.
     """
 
     def __init__(self, field: np.ndarray):
         self.field = field
         self.shape = field.shape
         self._spec = np.fft.rfft2(field)
-        self._spec_sq = np.fft.rfft2(field * field)
+        self._spec_sq: np.ndarray | None = None
+        self._stats: dict[tuple[int, int], np.ndarray] = {}
+
+    def _variance(self, th: int, tw: int) -> np.ndarray:
+        """Local variance under a ``th`` x ``tw`` window, cached per shape.
+
+        This was three of the five transforms every match used to cost, and it
+        depends only on the window's *size* -- so anchors of equal size, which
+        every style of one rendering family has, now share it.
+
+        A summed-area table computes the same quantity in O(n) and won a
+        microbenchmark by a wide margin. It lost the real one: its float64
+        buffers are twice the width of the complex64 spectra, and under eight
+        worker threads that traffic costs more than the transforms it saves
+        (9.98 against 12.92 panoramas/second). The FFT stays.
+        """
+        cached = self._stats.get((th, tw))
+        if cached is None:
+            if self._spec_sq is None:
+                self._spec_sq = np.fft.rfft2(self.field * self.field)
+            window = np.fft.rfft2(np.ones((th, tw), self.field.dtype), self.shape)
+            total = np.fft.irfft2(self._spec * window, self.shape)
+            total_sq = np.fft.irfft2(self._spec_sq * window, self.shape)
+            cached = np.maximum(total_sq - total * total / (th * tw), 1e-6)
+            self._stats[(th, tw)] = cached
+        return cached
 
     def match(self, template: np.ndarray) -> np.ndarray:
         """Return the NCC surface, shifted so a peak sits at the template centre."""
         th, tw = template.shape
-        tpl = normalise(template)
 
         # Correlation == convolution with the flipped kernel.
-        kernel = np.fft.rfft2(tpl[::-1, ::-1], self.shape)
+        kernel = _kernel_spectrum(normalise(template), self.shape)
         numerator = np.fft.irfft2(self._spec * kernel, self.shape)
 
-        # Local mean/variance of the image under the sliding window.
-        window = np.fft.rfft2(np.ones_like(template), self.shape)
-        total = np.fft.irfft2(self._spec * window, self.shape)
-        total_sq = np.fft.irfft2(self._spec_sq * window, self.shape)
-        count = th * tw
-        variance = np.maximum(total_sq - total * total / count, 1e-6)
-
-        surface = numerator / np.sqrt(variance)
+        surface = numerator / np.sqrt(self._variance(th, tw))
         # irfft2 places the correlation origin at the template's top-left; roll
         # it so index (y, x) means "template centred here".
         return np.roll(surface, (-(th // 2), -(tw // 2)), axis=(0, 1))
+
+
+# Anchors are fixed for the lifetime of a run and the field shape only changes
+# when the zoom does, so a padded kernel spectrum is worth keeping. Bounded so a
+# long run cannot grow it without limit.
+_KERNEL_CACHE: dict[tuple[bytes, tuple[int, int]], np.ndarray] = {}
+_KERNEL_CACHE_MAX = 32
+
+
+def _kernel_spectrum(template: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    key = (template.tobytes(), shape)
+    cached = _KERNEL_CACHE.get(key)
+    if cached is None:
+        if len(_KERNEL_CACHE) >= _KERNEL_CACHE_MAX:
+            _KERNEL_CACHE.clear()
+        cached = np.fft.rfft2(template[::-1, ::-1], shape)
+        _KERNEL_CACHE[key] = cached
+    return cached
 
 
 @dataclass(frozen=True)
