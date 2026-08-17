@@ -251,14 +251,19 @@ threads, RTX A5000). Live-network runs vary by roughly ±20%, so these are media
 
 | | pano/s | 101,233 panoramas |
 |---|---|---|
-| no GPU | **~7.4** | ~3.8 hours |
-| with GPU | **~11** | ~2.6 hours |
-| tiles already cached | ~13 | ~2.2 hours |
+| no GPU | **~16.7** | ~1.7 hours |
+| with GPU | **~22** | ~1.3 hours |
 
-**What actually costs time is tiles, not maths.** Fetching alone caps throughput at 10.8 panoramas/s
-at zoom 3 — so once correlation moved to the GPU, the network became the wall. That is why the ladder
-starts at zoom 2: four tiles instead of sixteen. About 65% of Gen 4 panoramas settle there and the
-rest fall through to zoom 3 unchanged, for an effective 9.7 tiles per panorama against 17.6.
+**The single biggest win was a thread setting, not an algorithm.** numpy's BLAS parallelises across
+every core it can see, and `consensus` compares detected instances with one matrix multiply. Twelve
+workers each fanning out to 32 BLAS threads is 384 threads over 32 cores: the process sat at 3111%
+CPU of a possible 3200% while the GPU idled at 25% and the network moved 8 MB/s. Pinning BLAS to one
+thread — the panorama pool is where the parallelism belongs — was worth **+47%** on its own, and moved
+the best worker count with it. See `cr_labeler/__init__.py`.
+
+Tiles still matter, which is why the ladder starts at zoom 2: four tiles instead of sixteen. About
+65% of Gen 4 panoramas settle there and the rest fall through to zoom 3 unchanged, for an effective
+9.7 tiles per panorama against 17.6.
 
 Three changes got it from 5.8 to ~11 panoramas/s, and none of them cost accuracy:
 
@@ -267,6 +272,22 @@ Three changes got it from 5.8 to ~11 panoramas/s, and none of them cost accuracy
 | One shared tile pool instead of one per panorama | warm fetch 16.6 ms → 6.3 ms; decode moved into the workers |
 | Ladder starts at zoom 2 | 1.8x fewer tiles |
 | Optional GPU correlation | that step 10.7x faster (167 ms vs 1793 ms at zoom 4) |
+| Optional GPU high-pass | 2.4–3.7x on that step, ~9% end to end |
+| **BLAS pinned to one thread** | **+47%** |
+
+### Nothing is saturated any more
+
+Sampled during a run at the current defaults: GPU **31%**, CPU **2.6 of 32 cores**, network
+**130 Mbit/s**. No resource on this machine is the limit — what is left is Google's own rate limiting
+and round-trip latency.
+
+Two things were tried against that and neither helped, both measured rather than assumed:
+
+- **Raising tile concurrency.** Pools of 48, 64 and 128 against the default 32, at 12 workers: 24.6,
+  22.9 and clearly worse respectively, against 22.9 — inside the run-to-run spread, and 128 was
+  reliably slower. Google throttles the extra requests away.
+- **Prefetching.** Covered [below](#prefetching-does-not-help-and-why); it hid latency the system had
+  already absorbed.
 
 ### Prefetching does not help, and why
 

@@ -56,23 +56,24 @@ def default_workers() -> int:
     """Threads to run panoramas on.
 
     Two different curves, so the answer depends on where the work is happening.
+    Both were re-measured after BLAS stopped competing for the same cores --
+    see :func:`cr_labeler._limit_math_library_threads` -- which moved both
+    optima, because the constraint they were originally fitted to was an
+    artefact.
 
-    On the CPU the transforms contend for memory bandwidth, but most of a
-    panorama is now waiting on the network, so mild oversubscription wins:
-    8.11 panoramas/second at 24 threads against 7.32 at 16. That used to cost
-    throughput -- the tile pool is shared now, so the number of requests in
-    flight no longer scales with this and Google stops throttling us for it.
+    With a GPU, 12: measured 23.53 panoramas/second against 19.05 at 8, 21.6 at
+    16 and 22.2 at 24. Eight was right only while every worker was fighting
+    BLAS for a core.
 
-    With a GPU the transforms leave the CPU entirely and serialise on one
-    device, so extra threads only queue behind each other: 11.54 at 8 threads
-    against 9.38 at 16 and 10.00 at 6.
+    On the CPU, 16: 16.67 against 15.48 at 24 and 13.33 at 32. The transforms
+    contend for memory bandwidth, so past the core count it goes backwards.
     """
     from .accel import device
 
     cores = os.cpu_count() or 4
     if device() is not None:
-        return 8
-    return max(8, min(24, cores))
+        return 12
+    return max(8, min(16, cores))
 
 
 class _PlainProgress:
