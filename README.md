@@ -247,6 +247,26 @@ Three changes got it from 5.8 to ~11 panoramas/s, and none of them cost accuracy
 | Ladder starts at zoom 2 | 1.8x fewer tiles |
 | Optional GPU correlation | that step 10.7x faster (167 ms vs 1793 ms at zoom 4) |
 
+### Prefetching does not help, and why
+
+Fetching the next panorama while the current one is being processed is the obvious next idea, and it
+was built and measured. It does not help, on either backend.
+
+A read-ahead pool was added that starts a panorama's tiles downloading when its row is *queued*
+rather than when a worker frees up. It worked exactly as intended — every base fetch was served from
+the read-ahead, 98% of them already complete on arrival, and the time a worker spent waiting for its
+first tiles fell from **150 ms to 18 ms**. Throughput did not move at all: 11.68 against 11.67
+panoramas/s, and 34.3 seconds wall either way.
+
+The reason is in the worker time budget. Removing the wait did not create idle capacity, it just moved
+the time into compute — 62.7% of worker time before, 81.5% after, with idle flat at ~1%. The run is
+bound by the correlation, not by the network, so hiding network latency buys nothing. Measured again
+on the CPU backend at 24 workers, where compute is not serialised onto one device: 7.41 against 7.41.
+
+What that leaves, for anyone wanting more: make the *compute* faster. A GPU high-pass is 34x on that
+step in isolation (13.6 ms against 469 ms at zoom 4) but is not bit-identical to Pillow's blur, so it
+was left out rather than risk the accuracy it was measured against.
+
 `--workers` is chosen by measurement and differs by backend. On the CPU most of a panorama is spent
 waiting on the network, so mild oversubscription wins (8.11 pano/s at 24 threads against 7.32 at 16);
 that used to backfire because each panorama opened its own tile pool and Google throttled the flood,
