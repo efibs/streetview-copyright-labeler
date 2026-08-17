@@ -161,3 +161,45 @@ def test_build_composites_returns_one_result_per_anchor(font_path, watermarked):
 def test_blank_panorama_yields_no_instances(font_path, blank):
     anchors = [Template(array=_anchor(font_path), style="modern")]
     assert build_composites(highpass(blank), anchors)[0].instances == 0
+
+
+def test_gpu_highpass_matches_pillow_closely():
+    """The GPU filter must reproduce Pillow's, not merely approximate it.
+
+    Pillow blurs with three extended box filters rather than a Gaussian; a real
+    Gaussian of the same sigma disagrees by up to 15 grey levels, which is what
+    this guards against regressing to.
+    """
+    import numpy as np
+    import pytest
+    from PIL import Image
+
+    from cr_labeler.accel import device
+    from cr_labeler.accel import highpass as gpu_highpass
+    from cr_labeler.geometry import HIGHPASS_SIGMA
+    from cr_labeler.signal import highpass
+
+    if device() is None:
+        pytest.skip("no GPU available")
+
+    rng = np.random.default_rng(0)
+    scene = rng.integers(0, 256, size=(256, 512), dtype=np.uint8)
+    image = Image.fromarray(scene, mode="L").convert("RGB")
+
+    gpu = gpu_highpass(image, HIGHPASS_SIGMA)
+    assert gpu is not None
+    reference = highpass(image)
+
+    assert np.abs(gpu - reference).max() <= 1.0
+    assert (gpu == reference).mean() > 0.90
+
+
+def test_gpu_highpass_can_be_switched_off(monkeypatch):
+    from PIL import Image
+
+    from cr_labeler.accel import highpass as gpu_highpass
+    from cr_labeler.geometry import HIGHPASS_SIGMA
+
+    monkeypatch.setenv("CR_LABELER_GPU_HIGHPASS", "0")
+    image = Image.new("RGB", (64, 64), (128, 128, 128))
+    assert gpu_highpass(image, HIGHPASS_SIGMA) is None

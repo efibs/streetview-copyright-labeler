@@ -29,7 +29,17 @@ def highpass(image: Image.Image, sigma: float = HIGHPASS_SIGMA) -> np.ndarray:
 
     ``grey - blur(grey)``.  Pillow's Gaussian is separable and C-implemented,
     which beats a numpy convolution comfortably at panorama sizes.
+
+    Runs on the GPU when there is one, reproducing Pillow's filter closely
+    enough to leave every label unchanged; :func:`cr_labeler.accel.highpass`
+    has the numbers and the switch to turn it off.
     """
+    from .accel import highpass as gpu_highpass
+
+    on_device = gpu_highpass(image, sigma)
+    if on_device is not None:
+        return on_device
+
     grey = image.convert("L")
     flat = np.asarray(grey, dtype=np.float32)
     blurred = np.asarray(grey.filter(ImageFilter.GaussianBlur(sigma)), dtype=np.float32)

@@ -144,15 +144,36 @@ Either way, `conda activate cr_labeler` (or re-sourcing the venv) is needed in e
 
 Only `numpy`, `pillow`, `requests` and `tqdm`. No OpenCV. Tile fetching needs no API key.
 
-**Optional GPU.** If PyTorch with a working CUDA device happens to be installed, the correlation runs
-there instead — about 1.4x end to end, and nothing about it is required. There is no GPU-only code
-path: without torch, without a driver, or with `CR_LABELER_DEVICE=cpu`, everything runs on numpy and
-produces the same labels (verified identical across all 543 hand-labelled panoramas). To try it:
+**Optional GPU.** If PyTorch with a working CUDA device happens to be installed, the correlation and
+the high-pass run there instead — roughly 1.5x end to end, and nothing about it is required. There is
+no GPU-only code path: without torch, without a driver, or with `CR_LABELER_DEVICE=cpu`, everything
+runs on numpy and Pillow. To try it:
 
 ```bash
 pip install torch            # optional, ~2.5 GB
-CR_LABELER_DEVICE=cpu ...    # force the numpy path back on at any time
+CR_LABELER_DEVICE=cpu ...    # force the whole numpy path back on
+CR_LABELER_GPU_HIGHPASS=0    # keep the GPU correlation, but blur with Pillow
 ```
+
+The GPU correlation is exact. The GPU high-pass is *not* bit-identical, and is worth being precise
+about, since accuracy is the point of this program. `ImageFilter.GaussianBlur` does not convolve a
+Gaussian — it runs three extended box filters — so the GPU reproduces that algorithm rather than a
+Gaussian, including its pass order and its rounding to whole grey levels in between. A real Gaussian
+of the same sigma would disagree by up to 15 grey levels; this disagrees by **at most 1**, with
+99.6–99.9% of pixels bit-identical.
+
+That is an empirical match rather than a proof, so it was checked where it matters:
+
+| | Pillow | GPU | Differences |
+|---|---|---|---|
+| Ground truth (20) | 20/20 | 20/20 | 0 |
+| 543 hand-labelled | 99.45% precision, 99.8% coverage | identical | **0** |
+| 1200 live Gen 4 | — | — | **0** |
+
+Zero label changes across 1763 panoramas, and the same three known `None` misses in both. It buys
+2.4x on the high-pass at zoom 2 and 3.7x at zoom 4 — about **11% of compute** and **9% end to end**
+(11.69 → 12.72 panoramas/s over six alternating cold runs). If you would rather have the byte-for-byte
+original, `CR_LABELER_GPU_HIGHPASS=0`.
 
 ## Quick start
 
@@ -263,9 +284,9 @@ the time into compute — 62.7% of worker time before, 81.5% after, with idle fl
 bound by the correlation, not by the network, so hiding network latency buys nothing. Measured again
 on the CPU backend at 24 workers, where compute is not serialised onto one device: 7.41 against 7.41.
 
-What that leaves, for anyone wanting more: make the *compute* faster. A GPU high-pass is 34x on that
-step in isolation (13.6 ms against 469 ms at zoom 4) but is not bit-identical to Pillow's blur, so it
-was left out rather than risk the accuracy it was measured against.
+That is also what pointed at the high-pass, which *is* compute and did pay off: see the GPU note under
+[Install](#install). Prefetching hid latency the system did not have; the high-pass removed work it
+actually did.
 
 `--workers` is chosen by measurement and differs by backend. On the CPU most of a panorama is spent
 waiting on the network, so mild oversubscription wins (8.11 pano/s at 24 threads against 7.32 at 16);
