@@ -1,0 +1,13 @@
+{
+  "countryCodes": ["AR", "BO", "BR", "CL", "CO", "CR", "EC", "PA", "PE", "PY", "UY"],
+  "distributionStrategy": {
+    "key": "FixedCountByMaxMinDistance",
+    "locationCountGoal": 400000,
+    "minMinDistance": 50
+  },
+  "globalLocationFilter": "DescriptionLength gt -1",
+  "output": {
+    "panoVerificationStrategy": "Newest",
+    "locationTags": ["Year", "Month", "CountryCode"]
+  }
+}
