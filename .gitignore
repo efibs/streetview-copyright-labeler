@@ -7,6 +7,12 @@ api-key*.txt
 # NOTE: git has no trailing comments in .gitignore -- a comment on the same line
 # becomes part of the pattern, so every note here sits on its own line.
 
+# Everything to do with an actual labelling run: the maps going in, the tagged
+# maps coming out, progress files and reports. Tracked as a folder so it exists
+# in a fresh clone, but nothing put inside it is ever committed -- these are
+# large, regenerable, and specific to one run.
+labeling/*
+!labeling/.gitkeep
 # downloaded tiles
 cache/
 # tagged maps

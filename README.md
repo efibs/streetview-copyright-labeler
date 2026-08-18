@@ -17,7 +17,7 @@ is **not** the capture date — it is when Google last processed the imagery. A 
 in 2012 can carry a 2026 copyright. No API exposes it. The only source of truth is the pixels.
 
 ```bash
-cr-label label my-map.json
+cr-label label labeling/my-map.json
 ```
 
 Input and output are [map-making.app](https://map-making.app/) / GeoGuessr map JSON. Each location
@@ -177,10 +177,19 @@ original, `CR_LABELER_GPU_HIGHPASS=0`.
 
 ## Quick start
 
+### Where runs live
+
+`labeling/` is the working folder for real runs — the maps going in, the tagged maps coming out,
+progress files, reports. **Everything inside it is gitignored**, because it is large, regenerable and
+specific to one run; the folder itself is tracked so it is there in a fresh clone. Put your map in
+it, point the commands at it, and nothing a run produces can end up in a commit.
+
 ```bash
-cr-label label CR_GT.json                                   # tag a map
-cr-label label in.json -o out.json --report r.csv --cache cache
-cr-label evaluate --gt CR_GT.json                           # score against GT_* tags
+cr-label label labeling/my-map.json \
+  -o labeling/my-map_labeled.json \
+  --report labeling/my-map.csv
+
+cr-label evaluate --gt CR_GT.json     # score against GT_* tags; ships with the repo
 ```
 
 A long run reports progress and how much of it is left:
@@ -213,8 +222,8 @@ is not the only thing to design for. Every result is appended to a progress file
 arrives, so **the same command run again picks up where it stopped**:
 
 ```bash
-cr-label label big.json -o out.json     # dies at 600k of 900k
-cr-label label big.json -o out.json     # "resuming: 600123 of 900000 already done"
+cr-label label labeling/big.json -o labeling/big_labeled.json   # dies at 600k of 900k
+cr-label label labeling/big.json -o labeling/big_labeled.json   # "resuming: 600123 of 900000"
 ```
 
 Nothing needs recovering by hand. Verified by killing a live run with `SIGKILL` mid-flight and
@@ -396,7 +405,7 @@ output and CI logs. Configure it in one of these instead:
 ```bash
 export GSV_API_KEY=...                                  # simplest
 cp .env.example .env && edit .env                       # .env is gitignored
-cr-label label in.json --api-key-file ~/.secrets/gsv    # chmod 600, outside the repo
+cr-label label labeling/in.json --api-key-file ~/.secrets/gsv   # chmod 600, outside the repo
 python -m keyring set cr_labeler google_maps_api_key    # needs the [keyring] extra
 ```
 
@@ -532,6 +541,7 @@ ruff check .
 | `panometa.py` | Panorama dimensions and neighbours, for generation detection |
 | `fetch.py` | Tile retrieval, stitching, retry, cache |
 | `checkpoint.py` | Append-only record of finished rows, so a killed run resumes |
+| `labeling/` | Working folder for runs; gitignored, and where the commands point |
 | `labeler.py` | Orchestration and the escalation ladder |
 | `geoguessr_io.py` | Reading and writing the map JSON |
 | `config.py` / `metadata.py` | API key handling and coordinate lookup |
