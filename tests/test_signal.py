@@ -203,3 +203,66 @@ def test_gpu_highpass_can_be_switched_off(monkeypatch):
     monkeypatch.setenv("CR_LABELER_GPU_HIGHPASS", "0")
     image = Image.new("RGB", (64, 64), (128, 128, 128))
     assert gpu_highpass(image, HIGHPASS_SIGMA) is None
+
+
+def _naive_find_peaks(surface, threshold, limit, nms_dy, nms_dx):
+    """The straightforward version: argmax, suppress, repeat.
+
+    Kept as the definition of correct.  find_peaks avoids rescanning a
+    megapixel surface once per peak, which is only a valid optimisation if it
+    returns exactly this -- including how ties are broken.
+    """
+    import numpy as np
+
+    from cr_labeler.signal import Peak, _parabolic_offset
+
+    work = surface.copy()
+    height, width = work.shape
+    peaks = []
+    for _ in range(limit):
+        y, x = divmod(int(np.argmax(work)), width)
+        score = float(work[y, x])
+        if score < threshold:
+            break
+        dx = dy = 0.0
+        if 0 < x < width - 1:
+            dx = _parabolic_offset(work[y, x - 1], score, work[y, x + 1])
+        if 0 < y < height - 1:
+            dy = _parabolic_offset(work[y - 1, x], score, work[y + 1, x])
+        peaks.append(Peak(x=x, y=y, score=score, dx=dx, dy=dy))
+        work[max(0, y - nms_dy) : y + nms_dy, max(0, x - nms_dx) : x + nms_dx] = -np.inf
+    return peaks
+
+
+def test_find_peaks_matches_the_naive_definition_exactly():
+    import numpy as np
+
+    from cr_labeler.geometry import MAX_INSTANCES, NMS_DX, NMS_DY
+    from cr_labeler.signal import find_peaks
+
+    rng = np.random.default_rng(20260818)
+    surfaces = [
+        rng.random((120, 200)).astype(np.float32),
+        # Ties everywhere: argmax resolves them to the lowest flat index, and a
+        # stable sort has to reproduce that or peaks come out in another order.
+        *[rng.choice([0.0, 0.4, 0.5, 0.9], size=(70, 110)).astype(np.float32) for _ in range(25)],
+        np.full((40, 60), 0.5, np.float32),
+        np.zeros((30, 30), np.float32),
+        np.full((20, 20), -np.inf, np.float32),
+    ]
+    for surface in surfaces:
+        expected = _naive_find_peaks(surface, 0.36, MAX_INSTANCES, NMS_DY, NMS_DX)
+        actual = find_peaks(surface, 0.36)
+        assert [(p.x, p.y, p.score, p.dx, p.dy) for p in actual] == [
+            (p.x, p.y, p.score, p.dx, p.dy) for p in expected
+        ]
+
+
+def test_find_peaks_honours_its_limit():
+    import numpy as np
+
+    from cr_labeler.signal import find_peaks
+
+    surface = np.zeros((200, 200), np.float32)
+    surface[::10, ::10] = 0.9          # 400 well-separated peaks
+    assert len(find_peaks(surface, 0.36, limit=7, nms_dy=2, nms_dx=2)) == 7

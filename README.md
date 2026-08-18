@@ -251,8 +251,13 @@ threads, RTX A5000). Live-network runs vary by roughly ±20%, so these are media
 
 | | pano/s | 101,233 panoramas |
 |---|---|---|
-| no GPU | **~16.7** | ~1.7 hours |
+| no GPU | **~18.6** | ~1.5 hours |
 | with GPU | **~22** | ~1.3 hours |
+| with GPU, tiles already cached | ~34 | ~0.8 hours |
+
+That last row is the useful one for knowing where the remaining headroom is: with the network taken
+out of the picture the same machine does **34 panoramas/s**. Everything between that and 22 is
+latency and Google's rate limiting, not work this program does.
 
 **The single biggest win was a thread setting, not an algorithm.** numpy's BLAS parallelises across
 every core it can see, and `consensus` compares detected instances with one matrix multiply. Twelve
@@ -274,6 +279,7 @@ Three changes got it from 5.8 to ~11 panoramas/s, and none of them cost accuracy
 | Optional GPU correlation | that step 10.7x faster (167 ms vs 1793 ms at zoom 4) |
 | Optional GPU high-pass | 2.4–3.7x on that step, ~9% end to end |
 | **BLAS pinned to one thread** | **+47%** |
+| Peak picking without rescanning the surface | −24% compute; +16% with no GPU |
 
 ### Nothing is saturated any more
 

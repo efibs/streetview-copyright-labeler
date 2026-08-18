@@ -194,17 +194,35 @@ def find_peaks(
 
     Returns peaks in descending score order, each carrying a sub-pixel offset
     estimated by parabolic interpolation of its neighbourhood.
+
+    The obvious way to write this -- take the argmax, suppress around it, repeat
+    -- rescans the whole surface once per peak, and the surface is a megapixel
+    while the peaks number about ten.  Collecting the handful of points over the
+    threshold first costs one pass instead of ten, and it was 18% of a
+    single-threaded run.
+
+    Identical output, not merely similar: ``argmax`` resolves ties to the lowest
+    flat index, which is what a *stable* sort on descending score reproduces,
+    and suppression still happens against the same working copy, so the
+    sub-pixel fit sees the same neighbours it always did.
     """
+    height, width = surface.shape
+    over = np.flatnonzero(surface >= threshold)
+    if over.size == 0:
+        return []
+    order = np.argsort(-surface.reshape(-1)[over], kind="stable")
+    candidates = over[order]
+
     work = surface.copy()
-    height, width = work.shape
     peaks: list[Peak] = []
 
-    for _ in range(limit):
-        index = int(np.argmax(work))
-        y, x = divmod(index, width)
-        score = float(work[y, x])
-        if score < threshold:
+    for index in candidates:
+        if len(peaks) >= limit:
             break
+        y, x = divmod(int(index), width)
+        score = float(work[y, x])
+        if score < threshold:  # already suppressed by a stronger neighbour
+            continue
 
         dx = dy = 0.0
         if 0 < x < width - 1:
