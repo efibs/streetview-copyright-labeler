@@ -1,0 +1,13 @@
+{
+  "countryCodes": ["AU"],
+  "distributionStrategy": {
+    "key": "FixedCountByMaxMinDistance",
+    "locationCountGoal": 200000,
+    "minMinDistance": 50
+  },
+  "globalLocationFilter": "DescriptionLength gt -1",
+  "output": {
+    "panoVerificationStrategy": "Newest",
+    "locationTags": ["Year", "Month", "CountryCode"]
+  }
+}
